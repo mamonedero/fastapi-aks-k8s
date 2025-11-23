@@ -1,0 +1,206 @@
+pipeline {
+    agent any
+    
+    environment {
+        // Azure Container Registry
+        ACR_NAME = '<TU_ACR>'
+        ACR_LOGIN_SERVER = "${ACR_NAME}.azurecr.io"
+        
+        // Credenciales de Azure (configuradas en Jenkins)
+        AZURE_CLIENT_ID = credentials('azure-client-id')
+        AZURE_CLIENT_SECRET = credentials('azure-client-secret')
+        AZURE_SUBSCRIPTION_ID = credentials('azure-subscription-id')
+        AZURE_TENANT_ID = credentials('azure-tenant-id')
+        
+        // Credenciales de ACR y GitHub
+        ACR_CREDENTIALS = credentials('acr-credentials')
+        GITHUB_CREDENTIALS = credentials('github-credentials')
+        
+        // AKS Cluster
+        RESOURCE_GROUP = 'miGrupoRecursos'
+        AKS_CLUSTER_NAME = 'miClusterAKS'
+        NAMESPACE = 'fastapi-services'
+        
+        // Repositorios de GitHub
+        VALORACIONES_REPO = 'https://github.com/mmonedero1/aks_fastapi_02.git'
+        CONSULTAS_REPO = 'https://github.com/mmonedero1/aks_fastapi_01.git'
+        
+        // Versión de imágenes
+        IMAGE_TAG = "${BUILD_NUMBER}"
+    }
+    
+    stages {
+        stage('Checkout Repositories') {
+            parallel {
+                stage('Checkout Valoraciones') {
+                    steps {
+                        dir('valoraciones') {
+                            git branch: 'main',
+                                credentialsId: 'github-credentials',
+                                url: "${VALORACIONES_REPO}"
+                        }
+                    }
+                }
+                
+                stage('Checkout Consultas') {
+                    steps {
+                        dir('consultas') {
+                            git branch: 'main',
+                                credentialsId: 'github-credentials',
+                                url: "${CONSULTAS_REPO}"
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Build Docker Images') {
+            parallel {
+                stage('Build Valoraciones') {
+                    steps {
+                        script {
+                            dir('valoraciones') {
+                                echo "Construyendo imagen de Valoraciones..."
+                                bat """
+                                    docker build -t ${ACR_LOGIN_SERVER}/valoraciones:${IMAGE_TAG} .
+                                    docker tag ${ACR_LOGIN_SERVER}/valoraciones:${IMAGE_TAG} ${ACR_LOGIN_SERVER}/valoraciones:latest
+                                """
+                            }
+                        }
+                    }
+                }
+                
+                stage('Build Consultas') {
+                    steps {
+                        script {
+                            dir('consultas') {
+                                echo "Construyendo imagen de Consultas..."
+                                bat """
+                                    docker build -t ${ACR_LOGIN_SERVER}/consultas:${IMAGE_TAG} .
+                                    docker tag ${ACR_LOGIN_SERVER}/consultas:${IMAGE_TAG} ${ACR_LOGIN_SERVER}/consultas:latest
+                                """
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Push to ACR') {
+            steps {
+                script {
+                    echo "Autenticando en Azure Container Registry..."
+                    withCredentials([usernamePassword(credentialsId: 'acr-credentials', 
+                                                     usernameVariable: 'ACR_USER', 
+                                                     passwordVariable: 'ACR_PASS')]) {
+                        bat """
+                            echo %ACR_PASS% | docker login ${ACR_LOGIN_SERVER} -u %ACR_USER% --password-stdin
+                        """
+                    }
+                    
+                    echo "Subiendo imágenes a ACR..."
+                    bat """
+                        docker push ${ACR_LOGIN_SERVER}/valoraciones:${IMAGE_TAG}
+                        docker push ${ACR_LOGIN_SERVER}/valoraciones:latest
+                        docker push ${ACR_LOGIN_SERVER}/consultas:${IMAGE_TAG}
+                        docker push ${ACR_LOGIN_SERVER}/consultas:latest
+                    """
+                }
+            }
+        }
+        
+        stage('Configure kubectl') {
+            steps {
+                script {
+                    echo "Configurando acceso a AKS..."
+                    bat """
+                        az login --service-principal ^
+                            -u %AZURE_CLIENT_ID% ^
+                            -p %AZURE_CLIENT_SECRET% ^
+                            --tenant %AZURE_TENANT_ID%
+                        
+                        az account set --subscription %AZURE_SUBSCRIPTION_ID%
+                        
+                        az aks get-credentials ^
+                            --resource-group ${RESOURCE_GROUP} ^
+                            --name ${AKS_CLUSTER_NAME} ^
+                            --overwrite-existing
+                    """
+                }
+            }
+        }
+        
+        stage('Deploy to AKS') {
+            steps {
+                script {
+                    echo "Creando namespace si no existe..."
+                    bat """
+                        kubectl create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
+                    """
+                    
+                    echo "Actualizando manifiestos con la nueva versión..."
+                    powershell """
+                        (Get-Content k8s/valoraciones-deployment.yaml) -replace '<TU_ACR>', '${ACR_NAME}' | Set-Content k8s/valoraciones-deployment-temp.yaml
+                        (Get-Content k8s/valoraciones-deployment-temp.yaml) -replace ':latest', ':${IMAGE_TAG}' | Set-Content k8s/valoraciones-deployment-final.yaml
+                        
+                        (Get-Content k8s/consultas-deployment.yaml) -replace '<TU_ACR>', '${ACR_NAME}' | Set-Content k8s/consultas-deployment-temp.yaml
+                        (Get-Content k8s/consultas-deployment-temp.yaml) -replace ':latest', ':${IMAGE_TAG}' | Set-Content k8s/consultas-deployment-final.yaml
+                    """
+                    
+                    echo "Desplegando servicios en AKS..."
+                    bat """
+                        kubectl apply -f k8s/valoraciones-deployment-final.yaml -n ${NAMESPACE}
+                        kubectl apply -f k8s/consultas-deployment-final.yaml -n ${NAMESPACE}
+                        kubectl apply -f k8s/ingress.yaml -n ${NAMESPACE}
+                    """
+                }
+            }
+        }
+        
+        stage('Verify Deployment') {
+            steps {
+                script {
+                    echo "Verificando despliegue..."
+                    bat """
+                        kubectl rollout status deployment/valoraciones-deployment -n ${NAMESPACE} --timeout=5m
+                        kubectl rollout status deployment/consultas-deployment -n ${NAMESPACE} --timeout=5m
+                        
+                        echo.
+                        echo === Pods desplegados ===
+                        kubectl get pods -n ${NAMESPACE}
+                        
+                        echo.
+                        echo === Services ===
+                        kubectl get services -n ${NAMESPACE}
+                        
+                        echo.
+                        echo === Ingress ===
+                        kubectl get ingress -n ${NAMESPACE}
+                    """
+                }
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo "✅ Despliegue completado exitosamente!"
+            echo "Valoraciones: https://api.midominio.com/valoraciones"
+            echo "Consultas: https://api.midominio.com/consultas"
+        }
+        failure {
+            echo "❌ El despliegue ha fallado. Revisa los logs."
+        }
+        always {
+            echo "Limpiando recursos temporales..."
+            bat """
+                del k8s\\*-temp.yaml 2>nul
+                del k8s\\*-final.yaml 2>nul
+                docker rmi ${ACR_LOGIN_SERVER}/valoraciones:${IMAGE_TAG} 2>nul
+                docker rmi ${ACR_LOGIN_SERVER}/valoraciones:latest 2>nul
+                docker rmi ${ACR_LOGIN_SERVER}/consultas:${IMAGE_TAG} 2>nul
+                docker rmi ${ACR_LOGIN_SERVER}/consultas:latest 2>nul
+            """
+        }
+    }
+}

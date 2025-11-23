@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: valoraciones-deployment
+  labels:
+    app: valoraciones
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: valoraciones
+  template:
+    metadata:
+      labels:
+        app: valoraciones
+    spec:
+      containers:
+      - name: valoraciones
+        image: <TU_ACR>.azurecr.io/valoraciones:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: PORT
+          value: "8000"
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: valoraciones-service
+spec:
+  type: ClusterIP
+  selector:
+    app: valoraciones
+  ports:
+  - port: 80
+    targetPort: 8000
+    protocol: TCP
