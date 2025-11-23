@@ -3,7 +3,7 @@ pipeline {
     
     environment {
         // Azure Container Registry
-        ACR_NAME = '<TU_ACR>'
+        ACR_NAME = 'acrdemo386'
         ACR_LOGIN_SERVER = "${ACR_NAME}.azurecr.io"
         
         // Credenciales de Azure (configuradas en Jenkins)
@@ -18,12 +18,12 @@ pipeline {
         
         // AKS Cluster
         RESOURCE_GROUP = 'miGrupoRecursos'
-        AKS_CLUSTER_NAME = 'miClusterAKS'
+        AKS_CLUSTER_NAME = 'aks-demo386'
         NAMESPACE = 'fastapi-services'
         
         // Repositorios de GitHub
-        VALORACIONES_REPO = 'https://github.com/mmonedero1/aks_fastapi_02.git'
-        CONSULTAS_REPO = 'https://github.com/mmonedero1/aks_fastapi_01.git'
+        VALORACIONES_REPO = 'https://github.com/mamonedero/aks_fastapi_02.git'
+        CONSULTAS_REPO = 'https://github.com/mamonedero/aks_fastapi_01.git'
         
         // Versión de imágenes
         IMAGE_TAG = "${BUILD_NUMBER}"
